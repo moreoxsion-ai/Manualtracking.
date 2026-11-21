@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RetroLens Web</title>
+<style>
+html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+video{display:none}
+.top{position:fixed;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 0;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;pointer-events:none;text-shadow:0 1px 4px #000}
+#hud{font:700 12px monospace;color:#ffe033;line-height:1.5}
+#st{font-size:12px;text-align:right;max-width:50%}
+.bot{position:fixed;left:0;right:0;bottom:0;padding:10px 14px calc(env(safe-area-inset-bottom,0px) + 12px);display:flex;justify-content:space-between;align-items:flex-end;gap:8px}
+.by{font:700 13px system-ui,sans-serif;color:rgba(255,255,255,.9);text-shadow:0 1px 4px #000}
+#ctl{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+button{font:inherit;font-weight:600;font-size:13px;padding:10px 14px;border-radius:12px;background:rgba(0,0,0,.55);color:#fff;border:1px solid rgba(255,255,255,.4)}
+#intro{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:#0f1115}
+#intro h1{margin:0;font-size:1.6rem}
+#intro p{max-width:420px;color:#b9bec8;font-size:.9rem;margin:0}
+#go{background:#ff7a45;border:0;font-size:18px;padding:14px 38px}
+</style>
+</head>
+<body>
+<canvas id="c" width="640" height="480"></canvas>
+<video id="v" playsinline muted></video>
+<div class="top"><div id="hud"></div><div id="st"></div></div>
+<div class="bot"><div class="by">by Achmad Farid Muzaffar</div>
+ <div id="ctl" hidden><button id="nx">Filter</button><button id="md">Mode</button><button id="fl">Balik kamera</button><button id="fs">Layar penuh</button></div></div>
+<div id="intro"><h1>RetroLens ✋</h1><div class="by">by Achmad Farid Muzaffar</div>
+ <p>Bentangkan dua tangan untuk membuka portal. Satu tangan membentuk segitiga. Pinch jempol dan kelingking untuk ganti filter, kepal dua tangan untuk ganti mode 2D/3D.</p>
+ <button id="go">Mulai</button></div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const video=$('v'),cv=$('c'),ctx=cv.getContext('2d',{willReadFrequently:true});
+const NAMES=['Dual-tone','Thermal','Sketch','Pixelate','Glitch','Red-channel','Invert','Rainbow'];
+let mode3d=true,lastMode=0;
+const off=document.createElement('canvas'),octx=off.getContext('2d');
+let fi=0,facing='user',hands=null,running=false,lastSwitch=0,stream=null;
+const say=t=>$('st').textContent=t;
+const lum=(r,g,b)=>.299*r+.587*g+.114*b;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+
+const FILTERS=[
+ (d)=>{for(let i=0;i<d.length;i+=4){const l=lum(d[i],d[i+1],d[i+2])/255;d[i]=lerp(20,255,l);d[i+1]=lerp(10,90,l);d[i+2]=lerp(90,170,l)}},
+ (d)=>{const P=[[0,0,40],[0,0,255],[255,0,0],[255,255,0],[255,255,255]];
+  for(let i=0;i<d.length;i+=4){const l=lum(d[i],d[i+1],d[i+2])/255*4,k=Math.min(3,l|0),t=l-k,a=P[k],b=P[k+1];d[i]=lerp(a[0],b[0],t);d[i+1]=lerp(a[1],b[1],t);d[i+2]=lerp(a[2],b[2],t)}},
+ (d,w,h)=>{const g=new Float32Array(w*h);
+  for(let i=0,j=0;i<d.length;i+=4,j++)g[j]=lum(d[i],d[i+1],d[i+2]);
+  for(let y=0;y<h-1;y++)for(let x=0;x<w-1;x++){const j=y*w+x,e=Math.abs(g[j]-g[j+w+1])+Math.abs(g[j+1]-g[j+w]),v=255-Math.min(255,e*4),i=j*4;d[i]=d[i+1]=d[i+2]=v}},
+ (d,w,h)=>{const b=8;for(let y=0;y<h;y+=b)for(let x=0;x<w;x+=b){const i=(y*w+x)*4;
+  for(let yy=y;yy<Math.min(h,y+b);yy++)for(let xx=x;xx<Math.min(w,x+b);xx++){const j=(yy*w+xx)*4;d[j]=d[i];d[j+1]=d[i+1];d[j+2]=d[i+2]}}},
+ (d,w,h)=>{const c=new Uint8ClampedArray(d),s=8;
+  for(let y=0;y<h;y++){const o=Math.random()<.08?((Math.random()*40-20)|0):0;
+   for(let x=0;x<w;x++){const i=(y*w+x)*4;d[i]=c[(y*w+clamp(x+s+o,0,w-1))*4];d[i+2]=c[(y*w+clamp(x-s+o,0,w-1))*4+2]}}},
+ (d)=>{for(let i=0;i<d.length;i+=4){d[i+1]=0;d[i+2]=0}},
+ (d)=>{for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2]}},
+ (d,w,h)=>{const t=performance.now()/120;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=(y*w+x)*4,a=(x+y)/10+t;
+   d[i]=d[i]*.4+(127+127*Math.sin(a))*.6;d[i+1]=d[i+1]*.4+(127+127*Math.sin(a+2.09))*.6;d[i+2]=d[i+2]*.4+(127+127*Math.sin(a+4.19))*.6}}
+];
+function hull(pts){pts=pts.slice().sort((a,b)=>a.x-b.x||a.y-b.y);
+ const cr=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x),lo=[],up=[];
+ for(const p of pts){while(lo.length>1&&cr(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();lo.push(p)}
+ for(const p of pts.slice().reverse()){while(up.length>1&&cr(up[up.length-2],up[up.length-1],p)<=0)up.pop();up.push(p)}
+ lo.pop();up.pop();return lo.concat(up)}
+const modeLabel=()=>{$('md').textContent='Mode: '+(mode3d?'3D':'2D');hud()};
+const hud=()=>$('hud').innerHTML='MODE: '+(mode3d?'3D (5 JARI)':'PERSEGI 2D')+' [kepal 2 tangan]<br>FILTER: '+NAMES[fi].toUpperCase()+' [pinch jempol-kelingking]';
+const label=()=>{$('nx').textContent='Filter: '+NAMES[fi];hud()};
+
+function portal(poly,W,H){
+ const xs=poly.map(p=>p.x),ys=poly.map(p=>p.y);
+ const x0=clamp(Math.floor(Math.min(...xs)),0,W-2),y0=clamp(Math.floor(Math.min(...ys)),0,H-2),x1=clamp(Math.ceil(Math.max(...xs)),x0+1,W),y1=clamp(Math.ceil(Math.max(...ys)),y0+1,H),w=x1-x0,h=y1-y0;
+ if(w<20||h<20)return;
+ const im=ctx.getImageData(x0,y0,w,h);FILTERS[fi](im.data,w,h);
+ off.width=w;off.height=h;octx.putImageData(im,0,0);
+ const path=()=>{ctx.beginPath();poly.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath()};
+ ctx.save();path();ctx.clip();ctx.drawImage(off,x0,y0);ctx.restore();
+ ctx.save();path();ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.shadowColor='#fff';ctx.shadowBlur=8;ctx.stroke();ctx.restore();
+}
+function onResults(r){
+ const W=cv.width,H=cv.height,m=facing==='user';
+ ctx.save();if(m){ctx.translate(W,0);ctx.scale(-1,1)}
+ ctx.drawImage(video,0,0,W,H);ctx.restore();
+ const hs=(r.multiHandLandmarks||[]).slice(),now=performance.now();
+ const sz=l=>Math.hypot(l[0].x-l[9].x,l[0].y-l[9].y);
+ for(const l of hs){
+  if(Math.hypot(l[4].x-l[20].x,l[4].y-l[20].y)/sz(l)<.35&&now-lastSwitch>900){fi=(fi+1)%FILTERS.length;lastSwitch=now;label()}
+ }
+ if(!hs.length){say('Bentangkan dua tangan untuk membuka portal');return}
+ const fist=l=>[8,12,16,20].reduce((a,i)=>a+Math.hypot(l[i].x-l[0].x,l[i].y-l[0].y),0)/4/sz(l)<1.25;
+ if(hs.length>1&&hs.every(fist)&&now-lastMode>1200){mode3d=!mode3d;lastMode=now;modeLabel()}
+ const P=l=>({x:m?(1-l.x)*W:l.x*W,y:l.y*H}),tips=l=>[4,8,12,16,20].map(i=>P(l[i]));
+ const S=hs.sort((a,b)=>P(a[0]).x-P(b[0]).x);
+ for(let i=0;i<S.length;){
+  if(i+1<S.length){const A=S[i],B=S[i+1];
+   portal(mode3d?hull(tips(A).concat(tips(B))):[P(A[4]),P(A[8]),P(B[8]),P(B[4])],W,H);i+=2}
+  else{const l=S[i];portal([P(l[4]),P(l[8]),P(l[0])],W,H);i++}
+ }
+ say('Portal: '+NAMES[fi]+' ('+(mode3d?'3D':'2D')+')');
+}
+
+async function cam(){
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:640},height:{ideal:480}},audio:false});
+ video.srcObject=stream;await video.play();
+ cv.width=640;cv.height=Math.round(640*video.videoHeight/video.videoWidth);
+}
+async function loop(){
+ if(video.readyState>=2&&video.videoWidth){try{await hands.send({image:video})}catch(e){}}
+ requestAnimationFrame(loop);
+}
+async function start(){
+ $('go').disabled=true;say('Memuat model tangan…');
+ try{
+  if(!window.Hands)throw new Error('pustaka MediaPipe tidak termuat');
+  if(!hands){
+   hands=new Hands({locateFile:f=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/'+f});
+   hands.setOptions({maxNumHands:4,modelComplexity:0,minDetectionConfidence:.6,minTrackingConfidence:.5});
+   hands.onResults(onResults);
+   await hands.initialize();
+  }
+  await cam();
+  $('intro').style.display='none';$('ctl').hidden=false;
+  if(!running){running=true;loop()}
+ }catch(e){say('Gagal: '+(e.message||e));$('go').disabled=false}
+}
+$('go').onclick=()=>{try{document.documentElement.requestFullscreen().catch(()=>{})}catch(e){}start()};
+$('fs').onclick=()=>{try{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen().catch(()=>{})}catch(e){}};
+$('md').onclick=()=>{mode3d=!mode3d;modeLabel()};
+$('nx').onclick=()=>{fi=(fi+1)%FILTERS.length;label()};
+$('fl').onclick=async()=>{facing=facing==='user'?'environment':'user';try{await cam()}catch(e){say('Gagal ganti kamera')}};
+label();modeLabel();
+</script>
+</body>
+</html>
